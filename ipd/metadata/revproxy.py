@@ -25,7 +25,7 @@ class LibvirtMetaReverseProxyResource(proxy.ReverseProxyResource, object):
 
     def _proxy_request(self, domain, request):
         uuid = UUID(bytes=domain.uuid)
-        hostname = socket.gethostname()
+        hostname = socket.getfqdn()
         ip_address = request.getClientIP()
 
         request.requestHeaders.setRawHeaders('X-Instance-ID', [str(uuid)])

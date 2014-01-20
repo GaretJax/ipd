@@ -44,7 +44,7 @@ def main():
     logging.setup_logging()
 
     reactor.callWhenRunning(setup_async)
-    reactor.callWhenRunning(_list_domain)
+    reactor.callWhenRunning(_runmetaserver)
     reactor.run()
 
     #project = Project(
@@ -127,30 +127,28 @@ def _create_domain():
     reactor.stop()
 
 
-
-@defer.inlineCallbacks
 def _runmetaserver():
-    from twisted.internet.endpoints import TCP4ClientEndpoint
-
-    point = TCP4ClientEndpoint(reactor, "192.168.56.1", 9009)
-
-    #router = MetadataServer()
     from twisted.web import server
     from twisted.internet import endpoints
     from ipd.metadata import MetadataIndex, MetadataServer
+    from ipd.libvirt.endpoints import TCP4LibvirtEndpoint
 
-    srv = MetadataServer(
-        IPD_MANAGER_KEY.public(),
-        point
+    srv = MetadataServer(IPD_MANAGER_KEY.public())
+    srv.register_host(
+        'ipd1',
+        TCP4LibvirtEndpoint(reactor, 'ipd1.tic.hefr.ch', 16509, 'qemu', 'system'),
     )
-    metadata_resource = MetadataIndex(srv)
 
-    site = server.Site(metadata_resource)
+    class S(server.Site, object):
+        def getResourceFor(self, request):
+            print('==>  ', request.path)
+            return super(S, self).getResourceFor(request)
+
+    site = S(MetadataIndex(srv))
 
     endpoint = endpoints.TCP4ServerEndpoint(reactor, 80)
     endpoint.listen(site)
 
-    yield defer.Deferred()
 
 @defer.inlineCallbacks
 def _exec_command():
@@ -160,8 +158,8 @@ def _exec_command():
     from twisted.python.filepath import FilePath
 
     command = '/bin/cat'
-    username = 'ipd-admin'
-    host = '192.168.56.102'
+    username = 'ipd'
+    host = '160.98.61.248'
 
     keys = [
         IPD_MANAGER_KEY,

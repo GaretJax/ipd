@@ -54,6 +54,7 @@ class DomainResolver(object):
             dl.append(d)
 
         yield defer.DeferredList(dl)
+        yield virt.connect_close()
         self._mac_to_uuid = addresses
 
     @defer.inlineCallbacks
