@@ -1,6 +1,7 @@
 *.py[cod]
 .virtualenv
 .DS_Store
+/workdir
 
 # Build artifacts
 /*.egg

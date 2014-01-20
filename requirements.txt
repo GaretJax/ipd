@@ -1,0 +1,13 @@
+# Explicit depencencies
+GitPython==0.3.2.RC1
+Parsley==1.2
+Twisted==13.2.0
+structlog==0.4.1
+txredis==2.3
+lxml==3.2.5
+
+# Indirect dependencies
+gitdb==0.5.4
+async==0.6.1
+smmap==0.8.2
+zope.interface==4.0.5

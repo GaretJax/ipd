@@ -1,0 +1,53 @@
+# Basics
+ws = (' ' | '\n' | '\t')
+name = <(letter | '_') (letterOrDigit | '_')*>:id -> id
+modifier = 'unsigned':mod ws+ -> mod
+modifiers = modifier*:mods -> frozenset(mods)
+type = modifiers:mods name:name -> type(name, mods)
+int = <'0x'? digit+>:d -> integer(int(d, 0))
+ref = name:id -> ref(id)
+optional = '*' name:id -> optional(id)
+value = int | ref
+f_array = name:id '[' (int | ref):len ']' -> (id, len)
+v_array = name:id '<' (int | ref)?:len '>' -> (id, len)
+array = f_array | v_array
+multiline_comment  = '/*' (~'*/' anything)* '*/'
+singleline_comment = '%'  (~'\n' anything)* '\n'
+comment = multiline_comment | singleline_comment
+ignored = (comment | ws)*
+
+# Variable declarations
+vdec_ptr   = type:type ws+ optional:opt -> declaration(id=opt.type, type=optional(type))
+vdec_farr  = type:type ws+ f_array:arr  -> declaration(id=arr[0],    type=fixed_array(type, arr[1]))
+vdec_varr  = type:type ws+ v_array:arr  -> declaration(id=arr[0],    type=variable_array(type, arr[1]))
+vdec_plain = type:type ws+ name:id      -> declaration(id=id,        type=type)
+
+# Type definitions
+tdef_ptr  = type:type ws+ optional:opt -> typedef(alias=opt.type, ref=optional(type))
+tdef_farr = type:type ws+ f_array:arr  -> typedef(alias=arr[0],    ref=fixed_array(type, arr[1]))
+tdef_varr = type:type ws+ v_array:arr  -> typedef(alias=arr[0],    ref=variable_array(type, arr[1]))
+
+# Opaque blocks
+opaque_block = '{' <(~'}' anything)*>:content '}' -> content
+
+# Struct blocks
+vardec = (vdec_ptr | vdec_farr | vdec_varr | vdec_plain):decl ws* ';' -> decl
+ws_vardec = ignored vardec:vdec ignored -> vdec
+struct_block = '{' ws_vardec+:content '}' -> content
+
+# Enum blocks
+enumdec = name:id ws* '=' ws* int:index ','? -> (id, index)
+ws_enumdec = ignored enumdec:edec ignored -> edec
+enum_block = '{' ws_enumdec*:content '}' -> content
+
+# Complex types
+struct  = 'struct'  ws+ name:id ws+ struct_block:val                   ws* ';' -> struct(id, val)
+enum    = 'enum'    ws+ name:id ws+ enum_block:val                     ws* ';' -> enum(id, val)
+const   = 'const'   ws+ name:id ws* '=' ws* value:val                  ws* ';' -> const(id, val)
+union   = 'union'   ws+ name:id ws+ (~'{' anything)* opaque_block:val  ws* ';' -> union(id, val)
+typedef = 'typedef' ws+ (tdef_ptr | tdef_farr | tdef_varr):tdef        ws* ';' -> tdef
+
+# Complete parser
+definition = (struct | enum | const | typedef | union)
+ws_definition = ignored definition:defin ignored -> defin
+tokens = ws_definition+
