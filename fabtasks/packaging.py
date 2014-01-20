@@ -1,6 +1,6 @@
 import pipes
 
-from fabric.api import settings, task, local, hide
+from fabric.api import settings, task, local, hide, runs_once
 from fabric.contrib.console import confirm
 
 
@@ -15,6 +15,7 @@ def is_working_tree_clean():
 
 
 @task
+@runs_once
 def lint():
     """
     Checks the source code using flake8.
@@ -24,6 +25,7 @@ def lint():
 
 
 @task
+@runs_once
 def authors():
     """
     Updates the AUTHORS file with a list of committers from GIT.
@@ -32,6 +34,7 @@ def authors():
 
 
 @task
+@runs_once
 def release():
     """
     Create a new release and upload it to PyPI.
