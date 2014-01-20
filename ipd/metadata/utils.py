@@ -4,6 +4,9 @@ from collections import namedtuple
 from lxml import etree
 from twisted.internet import defer
 
+import structlog
+logger = structlog.get_logger()
+
 
 ARPEntry = namedtuple('ARPEntry',
                       ['ip', 'type', 'flags', 'mac', 'mask', 'device'])
@@ -60,5 +63,7 @@ class DomainResolver(object):
         try:
             domain = self._mac_to_uuid[mac_address]
         except KeyError:
+            logger.msg('domainresolver.notfound', mac=mac_address,
+                       ip=ip_address)
             raise DomainResolver.DomainNotFound()
         defer.returnValue(domain)
