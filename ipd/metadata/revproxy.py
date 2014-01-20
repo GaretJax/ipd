@@ -18,7 +18,6 @@ class LibvirtMetaReverseProxyResource(proxy.ReverseProxyResource, object):
 
     def render(self, request):
         ip_address = request.getClientIP()
-        ip_address = '169.254.169.15'
         d = self._resolver.get_domain_by_ip(ip_address)
         d.addCallback(self._proxy_request, request)
         d.addErrback(self._render_error, request)
