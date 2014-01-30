@@ -20,3 +20,6 @@ class TCP4LibvirtEndpoint(endpoints.TCP4ClientEndpoint):
         assert auth_type.REMOTE_AUTH_NONE in res.types
         yield proto.connect_open('{}:///{}'.format(self.driver, self.mode), 0)
         defer.returnValue(proto)
+
+    def __call__(self):
+        return self.connect()

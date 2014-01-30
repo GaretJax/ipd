@@ -34,7 +34,28 @@ class MetadataMixin(object):
         return self.meta_server.get_metadata_for_uuid(hypervisor, domain_uuid)
 
 
-class UserdataResource(resource.Resource, object):
+class DelayedRendererMixin(object):
+    def _delayed_renderer(self, request):
+        raise NotImplementedError
+
+    def finish_write(self, res, request):
+        request.write(res)
+        request.finish()
+
+    def finish_err(self, failure, request):
+        request.setResponseCode(500)
+        request.write('500: Internal server error')
+        request.finish()
+        return failure
+
+    def render_GET(self, request):
+        d = self._delayed_renderer(request)
+        d.addCallback(self.finish_write, request)
+        d.addErrback(self.finish_err, request)
+        return server.NOT_DONE_YET
+
+
+class UserdataResource(DelayedRendererMixin, resource.Resource, object):
     isLeaf = True
     def __init__(self, server):
         super(UserdataResource, self).__init__()
@@ -48,29 +69,16 @@ class UserdataResource(resource.Resource, object):
 
         return self.meta_server.get_userdata_for_uuid(hypervisor, domain_uuid)
 
-    @defer.inlineCallbacks
     def _delayed_renderer(self, request):
-        userdata = yield self.get_userdata_from_request(request)
-        request.write(userdata)
-        request.finish()
-
-    def render_GET(self, request):
-        self._delayed_renderer(request)
-        return server.NOT_DONE_YET
+        return self.get_userdata_from_request(request)
 
 
-class AtomResource(MetadataMixin, resource.Resource, object):
-    @defer.inlineCallbacks
+class AtomResource(DelayedRendererMixin, MetadataMixin, resource.Resource,
+                   object):
     def _delayed_renderer(self, request):
-        metadata = yield self.get_metadata_from_request(request)
-        atom = self.get_value(metadata)
-        request.write(atom)
-        request.write('\n')
-        request.finish()
-
-    def render_GET(self, request):
-        self._delayed_renderer(request)
-        return server.NOT_DONE_YET
+        d = self.get_metadata_from_request(request)
+        d.addCallback(self.get_value)
+        return d
 
     def get_value(self, metadata):
         raise NotImplementedError()
@@ -160,7 +168,8 @@ class OpenstackMetadataAPI(IndexResource):
         self.putChild('user_data', UserdataResource(server))
 
 
-class OpenstackMetadata(MetadataMixin, resource.Resource, object):
+class OpenstackMetadata(DelayedRendererMixin, MetadataMixin, resource.Resource,
+                        object):
     isLeaf = True
 
     @defer.inlineCallbacks
@@ -172,13 +181,7 @@ class OpenstackMetadata(MetadataMixin, resource.Resource, object):
             for k, v in metadata['public_keys']
         }
 
-        request.write(json.dumps(metadata))
-        request.write('\n')
-        request.finish()
-
-    def render_GET(self, request):
-        self._delayed_renderer(request)
-        return server.NOT_DONE_YET
+        defer.returnValue(json.dumps(metadata))
 
 
 class APIVersionsIndex(RecursiveResource):
@@ -198,12 +201,52 @@ class APIVersionsIndex(RecursiveResource):
             return ''
 
 
-class MetadataIndex(RecursiveResource):
+class InstanceCallback(DelayedRendererMixin, resource.Resource):
+
+    isLeaf = True
+
+    def __init__(self, server):
+        self._server = server
+
+    @defer.inlineCallbacks
+    def _delayed_renderer(self, request):
+        instance_uuid = request.postpath[0]
+        data = yield self._server.get_instancedata_for_uuid(instance_uuid)
+        defer.returnValue(json.dumps(data))
+
+    def render_POST(self, request):
+        setip = 'nosetip' not in request.args
+        instance_id = request.args['instance_id'][0]
+        hostname = request.args['hostname'][0]
+
+        data = {
+            'hostname': hostname,
+            'status': 'running',
+        }
+
+        if setip:
+            ip = request.requestHeaders.getRawHeaders('X-Forwarded-For')[0]
+            data['ip_address'] = ip
+
+        for k, v in request.args.iteritems():
+            if k.startswith('pub_key_'):
+                try:
+                    data[k] = v[0].strip()
+                except:
+                    pass
+
+        self._server.add_instancedata_for_uuid(instance_id, data)
+        return ''
+
+
+class MetadataRootResource(RecursiveResource):
 
     isLeaf = False
 
     def __init__(self, server):
-        super(MetadataIndex, self).__init__()
+        super(MetadataRootResource, self).__init__()
+
+        self._server = server
 
         self.ec2 = APIVersionsIndex()
         self.ec2.register_api(EC2MetadataAPI(server))
@@ -211,9 +254,13 @@ class MetadataIndex(RecursiveResource):
         self.openstack = APIVersionsIndex()
         self.openstack.register_api(OpenstackMetadataAPI(server))
 
+        self.instancedata = InstanceCallback(self._server)
+
     def getChild(self, name, request):
         if name == 'openstack':
             child = self.openstack
+        elif name == 'instancedata':
+            child = self.instancedata
         else:
             child = self.ec2.getChild(name, request)
         return child

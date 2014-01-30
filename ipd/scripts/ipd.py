@@ -1,4 +1,4 @@
-from __future__ import absolute_import, print_function
+from __future__ import absolute_import
 import argparse
 import signal
 
@@ -44,7 +44,7 @@ def main():
     logging.setup_logging()
 
     reactor.callWhenRunning(setup_async)
-    reactor.callWhenRunning(_runmetaserver)
+    reactor.callWhenRunning(_create_domain)
     reactor.run()
 
     #project = Project(
@@ -53,15 +53,256 @@ def main():
     #    base_image=Image(),
     #)
 
+
+
+@defer.inlineCallbacks
+def _redis():
+    from twisted.internet import reactor
+    from twisted.internet import protocol
+    from txredis.client import RedisClient
+
+    HOST = 'localhost'
+    PORT = 6379
+
+    clientCreator = protocol.ClientCreator(reactor, RedisClient)
+    redis = yield clientCreator.connectTCP(HOST, PORT)
+
+    res = yield redis.ping()
+    print res
+
+    info = yield redis.info()
+    print info
+
+    res = yield redis.set('test', 42)
+    print res
+
+    test = yield redis.get('test')
+    print repr(test)
+
+    reactor.stop()
+
+
 from twisted.conch.ssh.keys import Key
 
 IPD_MANAGER_KEY = Key.fromFile('workdir/ipd-test-key.rsa')
+
+
+def _jsonserver():
+    from twisted.web import server, resource
+    from twisted.internet import endpoints
+    from twisted.application import service, internet, app
+    from ipd.metadata.resource import DelayedRendererMixin, RecursiveResource
+    from twisted.python.reflect import prefixedMethodNames
+    import json
+    from ipd import projects
+
+    class JSONResource(DelayedRendererMixin, RecursiveResource):
+        """
+        An example object to be published.
+        """
+
+        def finish_write(self, res, request):
+            if res:
+                request.write(res)
+            request.finish()
+
+        def finish_err(self, failure, request):
+            request.setResponseCode(500)
+            request.write('500: Internal server error')
+            request.finish()
+            return failure
+
+        def render(self, request):
+            d = self._delayed_renderer(request)
+            d.addCallback(self.finish_write, request)
+            d.addErrback(self.finish_err, request)
+            return server.NOT_DONE_YET
+
+        def _delayed_renderer(self, request):
+            m = getattr(self, 'handle_' + request.method, None)
+            if not m:
+                from twisted.web.error import UnsupportedMethod
+                allowed = prefixedMethodNames(self.__class__, 'handle_')
+                raise UnsupportedMethod(allowed)
+            request.setHeader('content-type', 'text/json')
+            d = defer.maybeDeferred(m, request)
+            d.addCallback(lambda r: json.dumps(r) if r is not None else None)
+            return d
+
+    class ProjectsListResource(JSONResource):
+        def __init__(self, manager):
+            super(ProjectsListResource, self).__init__()
+            self.manager = manager
+
+        def getChild(self, name, request):
+            if name == '':
+                return self
+            else:
+                return ProjectResource(name, self.manager)
+
+        def handle_GET(self, request):
+            d = self.manager.get_projects()
+            d.addCallback(list)
+            return d
+
+    class ProjectResource(JSONResource):
+        def __init__(self, key, manager):
+            super(ProjectResource, self).__init__()
+            self.key = key
+            self.manager = manager
+
+        @defer.inlineCallbacks
+        def handle_GET(self, request):
+            try:
+                prj = yield self.manager.get_project(self.key)
+            except projects.ProjectNotFound:
+                request.setResponseCode(404)
+                defer.returnValue({
+                    'error': 'project-does-not-exist',
+                    'key': self.key,
+                })
+            else:
+                defer.returnValue(prj)
+
+        @defer.inlineCallbacks
+        def handle_PUT(self, request):
+            repo = request.args['repo'][0]
+            try:
+                yield self.manager.register_project(self.key, repo)
+            except projects.ProjectAlreadyExists:
+                request.setResponseCode(403)
+                defer.returnValue({
+                    'error': 'project-already-exists',
+                    'key': self.key,
+                })
+
+        @defer.inlineCallbacks
+        def handle_DELETE(self, request):
+            yield self.manager.unregister_project(self.key)
+
+
+    class BuildsListResource(JSONResource):
+        def __init__(self,  builder):
+            super(BuildsListResource, self).__init__()
+            self.builder = builder
+
+        def getChild(self, name, request):
+            if name == '':
+                return self
+            else:
+                return BuildResource(name, self.builder)
+
+        def handle_GET(self, request):
+            d = self.builder.get_builds()
+            d.addCallback(list)
+            return d
+
+        @defer.inlineCallbacks
+        def handle_POST(self, request):
+            project_key = request.args['project_key'][0]
+            commit_id = request.args['commit_id'][0]
+
+            try:
+                build_id = yield self.builder.schedule_build(project_key,
+                                                             commit_id)
+            except projects.BuildspecNotFound:
+                request.setResponseCode(403)
+                defer.returnValue({
+                    'error': 'buildspec-not-found',
+                    'project_key': project_key,
+                    'commit_id': commit_id,
+                })
+            else:
+                defer.returnValue(build_id)
+
+
+    class BuildResource(JSONResource):
+        def __init__(self, id, builder):
+            super(BuildResource, self).__init__()
+            self.id = id
+            self.builder = builder
+
+        @defer.inlineCallbacks
+        def handle_PUT(self, request):
+            project_key, commit_id = self.id.split(':')
+            try:
+                yield self.manager.register_project(self.key, repo)
+            except projects.BuildAlreadyExists:
+                request.setResponseCode(403)
+                defer.returnValue({
+                    'error': 'project-already-exists',
+                    'key': self.key,
+                })
+
+        @defer.inlineCallbacks
+        def handle_DELETE(self, request):
+            yield self.manager.unregister_project(self.key)
+
+
+
+
+    from twisted.internet import reactor
+    from twisted.python.filepath import FilePath
+    import functools
+    from txredis.client import RedisClient
+    from ipd.libvirt.endpoints import TCP4LibvirtEndpoint
+    from ipd.utils import ProtocolConnector
+
+    # Configuration
+    libvirt = functools.partial(TCP4LibvirtEndpoint, reactor=reactor,
+                                port=16509, driver='qemu', mode='system')
+
+    hosts = ('ipd{}.tic.hefr.ch'.format(i) for i in range(1, 2))
+    hosts = {h: libvirt(host=h) for h in hosts}
+
+    workdir = FilePath('workdir/manager')
+
+    redis = ProtocolConnector(reactor, 'localhost', 6379, RedisClient)
+
+    # Business logic setup
+    manager = projects.ProjectsManager(workdir, redis, IPD_MANAGER_KEY)
+    builder = projects.Builder(manager, hosts, redis)
+
+    # API resources
+    api_root = RecursiveResource()
+    prjs = ProjectsListResource(manager)
+    builds = BuildsListResource(builder)
+
+    # Create tree
+    api_root.putChild('projects', prjs)
+    api_root.putChild('builds', builds)
+
+    site = server.Site(api_root)
+    api_service = internet.TCPServer(8000, site)
+
+    # Application setup
+    application = service.Application('projects-manager')
+    api_service.setServiceParent(application)
+    manager.setServiceParent(application)
+    builder.setServiceParent(application)
+
+    # Start application
+    service.IService(application).privilegedStartService()
+    app.startApplication(application, False)
+
+
+
+
+
+
+
+
+
+
+
+
 
 @defer.inlineCallbacks
 def _create_domain():
     from twisted.internet.endpoints import TCP4ClientEndpoint
     from ipd.libvirt import LibvirtFactory, remote, error
-    import binascii
+    from lxml import etree
+    from twisted.python.filepath import FilePath
 
     point = TCP4ClientEndpoint(reactor, 'ipd1.tic.hefr.ch', 16509)
     proto = yield point.connect(LibvirtFactory())
@@ -74,6 +315,10 @@ def _create_domain():
 
     yield proto.connect_open('qemu:///system', 0)
 
+    name = 'wintest'
+    base_domain = 'windows'
+    vnc_pass = ''
+
     # Create storage pool
     try:
         res = yield proto.storage_pool_lookup_by_name('ipd-images')
@@ -85,15 +330,29 @@ def _create_domain():
 
     # Create base image
     try:
-        res = yield proto.storage_vol_lookup_by_name(pool, 'base')
+        res = yield proto.storage_vol_lookup_by_name(pool, name)
     except error.RemoteError:
-        with open('workdir/base-vm/volume.xml') as fh:
-            volxml = fh.read()
+        print('Volume not found')
+    else:
+        res = yield proto.storage_vol_delete(res.vol, 0)
+
+    volume = FilePath('workdir/volumes')
+    volume = volume.child('{}.xml'.format(base_domain))
+
+    if volume.exists():
+        with volume.open() as fh:
+            tree = etree.parse(fh)
+
+        tree.find('name').text = name
+        volxml = etree.tostring(tree)
+
+        print volxml
+
         res = yield proto.storage_vol_create_xml(pool, volxml, 0)
 
     # Create domain
     try:
-        res = yield proto.domain_lookup_by_name('base3')
+        res = yield proto.domain_lookup_by_name(name)
     except error.RemoteError:
         print('Domain not found')
     else:
@@ -115,11 +374,29 @@ def _create_domain():
         else:
             raise RuntimeError()
 
-    with open('workdir/base-vm/domain.xml') as fh:
-        domxml = fh.read()
+    domain = FilePath('workdir/domains')
+    domain = domain.child('{}.xml'.format(base_domain))
+
+    with domain.open() as fh:
+        tree = etree.parse(fh)
+
+    tree.find('name').text = name
+
+    if volume.exists():
+        tree.find('devices/disk/source').attrib['volume'] = name
+
+    if vnc_pass:
+        tree.find('devices/graphics').attrib['passwd'] = vnc_pass
+
+    domxml = etree.tostring(tree)
+
+    print domxml
 
     res = yield proto.domain_create_xml(domxml, 0)
     print(res)
+
+    res = yield proto.domain_get_xml_desc(res.dom, 0)
+    print res.xml
 
     # Cleanup
     yield proto.connect_close()
@@ -127,85 +404,24 @@ def _create_domain():
     reactor.stop()
 
 
-def _runmetaserver():
-    from twisted.web import server
-    from twisted.internet import endpoints
-    from ipd.metadata import MetadataIndex, MetadataServer
-    from ipd.libvirt.endpoints import TCP4LibvirtEndpoint
-
-    srv = MetadataServer(IPD_MANAGER_KEY.public())
-    srv.register_host(
-        'ipd1',
-        TCP4LibvirtEndpoint(reactor, 'ipd1.tic.hefr.ch', 16509, 'qemu', 'system'),
-    )
-
-    class S(server.Site, object):
-        def getResourceFor(self, request):
-            print('==>  ', request.path)
-            return super(S, self).getResourceFor(request)
-
-    site = S(MetadataIndex(srv))
-
-    endpoint = endpoints.TCP4ServerEndpoint(reactor, 80)
-    endpoint.listen(site)
-
-
 @defer.inlineCallbacks
 def _exec_command():
-    from twisted.internet import protocol
     from twisted.conch.client.knownhosts import KnownHostsFile
-    from twisted.conch.endpoints import SSHCommandClientEndpoint
     from twisted.python.filepath import FilePath
+    from ipd import ssh
 
-    command = '/bin/cat'
-    username = 'ipd'
-    host = '160.98.61.248'
+    username = 'ubuntu'
+    host = '160.98.61.245'
 
     keys = [
         IPD_MANAGER_KEY,
     ]
     known_hosts = KnownHostsFile.fromPath(FilePath('workdir/known_hosts'))
 
-    endpoint = SSHCommandClientEndpoint.newConnection(
-        reactor, command, username, host, keys=keys, knownHosts=known_hosts)
+    endpoint = ssh.MultipleCommandsClientEndpoint.newConnection(
+        reactor, username, host, keys=keys, knownHosts=known_hosts)
 
-    class CommandsProtocol(protocol.Protocol):
-        def connectionMade(self):
-            self.disconnected = None
-
-        def exec_command(self, command):
-            conn = self.transport.conn
-            factory = protocol.Factory()
-            factory.protocol = SingleCommandProtocol
-
-            e = SSHCommandClientEndpoint.existingConnection(
-                conn, b"/bin/echo %d" % (i,))
-            d = e.connect(factory)
-            d.addCallback(lambda p: p.finished)
-            return d
-
-        def disconnect(self):
-            d = self.disconnected = defer.Deferred()
-            self.transport.loseConnection()
-            return d
-
-        def connectionLost(self, reason):
-            if self.disconnected:
-                self.disconnected.callback(None)
-
-    class SingleCommandProtocol(protocol.Protocol):
-        def connectionMade(self):
-            self.data = []
-            self.finished = defer.Deferred()
-
-        def dataReceived(self, data):
-            self.data.append(data)
-
-        def connectionLost(self, reason):
-            self.finished.callback(''.join(self.data))
-
-    factory = protocol.Factory()
-    factory.protocol = CommandsProtocol
+    factory = ssh.MultipleCommandsFactory()
 
     proto = yield endpoint.connect(factory)
 
@@ -274,22 +490,3 @@ def _list_domain():
 
     #res = yield proto.domain_create(res.domains[-1])
     #print(res)
-
-
-@defer.inlineCallbacks
-def _poll_repo():
-    from ipd import repository
-
-    try:
-        #repo = yield repository.GitRepository.clone(
-        #    'https://github.com/GaretJax/poller-test', 'workdir/poller-test')
-        yield defer.succeed(None)
-        repo = repository.GitRepository('workdir/poller-test')
-        poller = repository.RepositoryPoller(repo)
-        def t(repo, branch, new, old):
-            logger.msg('up', repo=repo, branch=branch, new=new, old=old)
-        poller.subscribe(t)
-        poller.start_polling()
-    finally:
-        pass
-        #reactor.stop()

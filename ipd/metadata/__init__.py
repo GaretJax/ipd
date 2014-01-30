@@ -1,4 +1,5 @@
-from .resource import MetadataIndex
-from .server import MetadataServer
+from .resource import MetadataRootResource
+from .manager import MetadataManager
 
-__all__ = ['MetadataServer', 'MetadataIndex']
+
+__all__ = ['MetadataRootResource', 'MetadataManager']

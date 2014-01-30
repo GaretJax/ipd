@@ -30,6 +30,7 @@ class GitRepository(object):
     @classmethod
     @defer.inlineCallbacks
     def clone(cls, url, dest):
+        logger.msg('git.clone', url=url, dest=dest)
         yield threads.deferToThread(Repo.clone_from, url, dest, mirror=True)
         defer.returnValue(cls(dest))
 
@@ -80,10 +81,12 @@ class RepositoryPoller(ObservableMixin, object):
     def start_polling(self, interval=None):
         if interval is None:
             interval = self.polling_interval
+        self._log('poller.starting', interval=interval)
         self._poller_call.start(interval)
 
     def stop_polling(self):
         self._poller_call.stop()
+        self._log('poller.stopped')
 
     @defer.inlineCallbacks
     def _poll(self):
