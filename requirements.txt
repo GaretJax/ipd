@@ -4,7 +4,7 @@ Parsley==1.2
 Twisted==13.2.0
 structlog==0.4.1
 txredis==2.3
-lxml==3.2.5
+lxml==4.6.2
 
 # Indirect dependencies
 gitdb==0.5.4
