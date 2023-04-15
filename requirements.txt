@@ -1,5 +1,5 @@
 # Explicit depencencies
-GitPython==0.3.2.RC1
+GitPython==3.1.30
 Parsley==1.2
 Twisted==13.2.0
 structlog==0.4.1
